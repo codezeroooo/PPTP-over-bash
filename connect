@@ -1,0 +1,249 @@
+#!/bin/bash
+USERNAME="test"
+NETPASSWORD="test"
+VPN_TARGET_ADDRESS="172.0.0.16"
+INTERNAL_NET="192.168.0.0/16"
+INTERNAL_NETMASK="255.255.0.0"
+LOCAL_NETS="192.168.0.0/16"
+CALLNAME="studnet"
+DEBUG="no" 
+VERSION="V0.17"
+OPTIONS_FILE="/etc/ppp/options.vpn"
+echo "VPN Linux generic startup script $VERSION"
+ACTION="$1"
+if ! test -z "$2"; then
+  if test "$2" == "debug"; then
+    DEBUG="yes"
+  fi
+fi
+PATH="$PATH:/sbin:/usr/sbin:/usr/local/sbin"
+WHOAMI=`whoami|grep root`
+if test -z "$WHOAMI" ; then
+  echo Must be root to execute this script.
+  exit 1
+fi
+ROUTE=`which route`
+if test -z $ROUTE ; then
+  echo Cannot find program route. Bailing out
+  exit 1
+fi 
+PPTP_BIN=`which pptp`
+if test -z "$PPTP_BIN"; then
+  echo Cannot find pptp VPN client program. Please install pptp!
+  exit 1
+fi
+MODTOOL=`which modprobe`
+if test -z "$MODTOOL"; then
+  MODTOOL=`which insmod`
+  if test -z $MODTOOL; then
+        echo "Could not find modprobe or insmod"
+        exit 1
+  fi
+fi
+PPP_BIN=`which pppd`
+if test -z $PPP_BIN; then
+  echo Cannot find pppd. Please install ppp!
+  exit 1
+fi
+$MODTOOL -q ppp_mppe 2>&1 > /dev/null
+$MODTOOL -q mppe 2>&1 > /dev/null
+$MODTOOL -q arc4 2>&1 > /dev/null
+$MODTOOL -q ppp_mppe_mppc 2>&1 > /dev/null
+MPPE_CHECK=`lsmod |awk ' { print $1}'|grep mppe`
+PPP_VERSION=`$PPP_BIN --version 2>&1 |awk ' { print $3}'|cut -d- -f1`
+echo "Found pppd version $PPP_VERSION"
+cat > $OPTIONS_FILE << EOF
+### VPN
+name $USERNAME
+remotename $USERNAME
+lock
+noauth
+nodeflate
+nobsdcomp
+debug
+mtu 1490
+mru 1490
+lcp-echo-failure 5
+lcp-echo-interval 120
+idle 86400
+defaultroute
+replacedefaultroute
+holdoff 30
+maxfail 0
+refuse-eap
+refuse-pap
+refuse-chap
++ipv6
+EOF
+if test -z $MPPE_CHECK; then
+  echo "Found no MPPE support in kernel. Not using encryption."
+else
+  case "$PPP_VERSION" in
+    2.4.0|2.4.1)
+      cat >> $OPTIONS_FILE << EOF
+### Encryption settings
+mppe-40
+mppe-128
+mppe-stateless
+EOF
+    ;;
+    2.4.2)
+      cat >> $OPTIONS_FILE << EOF
+### Encryption settings
+require-mppe
+EOF
+    ;;
+    2.4.3|2.4.4|2.4.5)
+      cat >> $OPTIONS_FILE << EOF      
+require-mppe-40
+require-mppe-128
+nomppe-stateful
+EOF
+    ;;
+    *)
+      echo Unknown pppd version $PPP_VERSION. Not using encryption!
+    ;;
+  esac
+fi
+
+cp $OPTIONS_FILE /etc/ppp/peers/$CALLNAME
+
+echo "### PPTP call through pppd" >> /etc/ppp/peers/$CALLNAME
+echo -n 'pty "pptp ' >> /etc/ppp/peers/$CALLNAME
+echo -n $VPN_TARGET_ADDRESS >> /etc/ppp/peers/$CALLNAME
+echo -n ' --nolaunchpppd"' >> /etc/ppp/peers/$CALLNAME
+
+case "$ACTION" in
+  start)
+    $MODTOOL ip_gre 2>&1 > /dev/null
+    VPN_STATUS=`$0 status|grep "Cannot find any"`
+    if test -z "$VPN_STATUS" ; then
+      echo There is already a VPN connection running
+      exit 1
+    fi
+    touch /tmp/chap-secrets.new
+    chmod 600 /tmp/chap-secrets.new
+    cat /etc/ppp/chap-secrets |grep -v "$USERNAME " > /tmp/chap-secrets.new
+    echo "$USERNAME * $NETPASSWORD *" >> /tmp/chap-secrets.new
+    cp /tmp/chap-secrets.new /etc/ppp/chap-secrets
+    chmod 600 /etc/ppp/chap-secrets
+    rm -f /tmp/chap-secrets.new
+    GATEWAY=`${ROUTE} -n |grep UG|tail -1|awk ' { print $2}'`
+    
+    if test -z "$GATEWAY" ; then
+      echo Cannot find any default gateway!
+      exit 1
+    fi 
+
+    echo Found Gateway $GATEWAY
+
+    echo $GATEWAY > /etc/ppp/vpn-gateway.backup
+
+    NAMESERVERS=`cat /etc/resolv.conf|grep nameserver|sed "s/nameserver //g"|grep -v "#"`
+    echo Found nameservers: $NAMESERVERS
+    if test -z "$NAMESERVERS" ; then
+      echo Cannot find any nameservers in /etc/resolv.conf
+      echo Please make sure that /etc/resolv.conf is set up correctly
+      exit 1
+    fi
+
+    ### set routing tables if they do not exist right now
+
+    INTERNAL_NET_ROUTE=`${ROUTE} -n|grep $INTERNAL_NET|grep $GATEWAY|grep $INTERNAL_NETMASK`
+    if test -z "$INTERNAL_NET_ROUTE" ; then
+      for i in $LOCAL_NETS; do
+        ${ROUTE} add -net $i gw $GATEWAY
+      done
+    fi
+
+    for NAMESERVER in $NAMESERVERS; do
+      NAMESERVER_ROUTE=`${ROUTE} -n|grep $NAMESERVER|grep UGH|grep $GATEWAY`
+      if test -z "$NAMESERVER_ROUTE" ; then
+        ${ROUTE} add -host $NAMESERVER gw $GATEWAY
+      fi
+    done
+
+    IPTABLES=`which iptables`
+    if test -z "$IPTABLES"; then
+      echo "Cannot find iptables userland utility. Not applying filter rules"
+    else 
+      echo "Applying changes to firewall rulesets (allow IP protocol 47 GRE)"
+      $IPTABLES -I INPUT -p 47 -j ACCEPT
+      $IPTABLES -I OUTPUT -p 47 -j ACCEPT
+    fi
+
+    echo -n "Starting pptp connection to VPN StudNet gateway "
+    if test "$DEBUG" == "yes" ; then
+      ${PPP_BIN} call $CALLNAME nodetach &
+    else
+      ${PPP_BIN} call $CALLNAME &
+    fi
+    for ((i = 0 ; i< 30;i++)); do
+      sleep 1
+      echo -n "."
+      PPP_DEVICE=`ifconfig|grep -v ippp0|grep ppp|awk ' { print $1}'`
+
+      if ! test -z "$PPP_DEVICE" ; then
+        echo " connection established"
+        break
+      fi
+    done
+
+    if test -z "$PPP_DEVICE" ; then
+      echo ""
+      echo Could not start pptp connection to vpn server
+      echo Please run ./vpn.sh start debug to obtain logging output
+      exit 1
+    fi
+
+  ;;
+  stop)
+    if test -f /etc/ppp/vpn-gateway.backup ; then
+      GATEWAY=`cat /etc/ppp/vpn-gateway.backup`
+    fi
+    GATEWAY_VIA_ROUTE=`${ROUTE} -n |grep UG|tail -1|awk ' { print $2}'`
+
+    rm -f /etc/ppp/vpn-gateway.backup  
+
+    PPPD_PID=`ps auxww|grep pppd |grep "call $CALLNAME"|grep -v grep|awk ' { print $2}'`
+    if test -z $PPPD_PID ; then
+       echo Cannot find any running VPN connection to terminate
+       exit 0
+    else
+       for i in $PPPD_PID ; do
+         kill $i
+       done
+       sleep 2
+       echo "VPN connection(s) closed"
+    fi
+
+    IPTABLES=`which iptables`
+    if test -z "$IPTABLES"; then
+      echo "Cannot find iptables userland utility. Not removing filter rules"
+    else
+      echo "Applying changes to firewall rulesets (remove startup rule)"
+      $IPTABLES -D INPUT -p 47 -j ACCEPT
+      $IPTABLES -D OUTPUT -p 47 -j ACCEPT
+    fi
+
+  ;;
+  status)
+    PPPD_PID=`ps auxww|grep pppd |grep "call $CALLNAME"|grep -v grep|awk ' {print $2}'`
+ 
+    if test -z $PPPD_PID ; then
+       echo "Cannot find any VPN connection(s) started by this startup script"
+       exit 1
+    else
+       echo "VPN connection seems to be running"
+       exit 0
+    fi
+ 
+  ;;
+  restart)
+   $0 stop && $0 start
+  ;;
+  *)
+  echo "Usage: $0 {start|stop|restart|status}"
+  exit 1
+  ;;
+esac
