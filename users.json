@@ -1,0 +1,10 @@
+{
+  "users": [
+    {
+      "username": "testUser",
+      "password": "123456",
+      "license_key": "ABC-DEF-GHI",
+      "hwid": "UNREGISTERED"
+    }
+  ]
+}
