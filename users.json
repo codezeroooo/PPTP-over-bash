@@ -1,9 +1,21 @@
 {
   "users": [
     {
-      "username": "testUser",
-      "password": "123456",
+      "username": "user1",
+      "password": "pass123",
       "license_key": "ABC-DEF-GHI",
+      "hwid": "UNREGISTERED"
+    },
+    {
+      "username": "user2",
+      "password": "secure456",
+      "license_key": "JKL-MNO-PQR",
+      "hwid": "UNREGISTERED"
+    },
+    {
+      "username": "admin",
+      "password": "adminpass",
+      "license_key": "XYZ-123-789",
       "hwid": "UNREGISTERED"
     }
   ]
